@@ -16,10 +16,13 @@ const SESSION_DAYS = 30;
 fs.mkdirSync(PTS, { recursive: true });
 
 const hash = (p, salt) => crypto.scryptSync(String(p), salt, 32).toString('hex');
-function genPass() {
+// Пароли создаются из секретного слова SEED, поэтому не меняются при перезапуске сервера.
+const SEED = process.env.SEED || 'change-me-seed';
+function genPass(login) {
+  const h = crypto.createHash('sha256').update(SEED + '|' + login).digest();
   const c = 'abcdefghjkmnpqrstuvwxyz23456789';
   let s = '';
-  for (let i = 0; i < 8; i++) s += c[crypto.randomInt(c.length)];
+  for (let i = 0; i < 8; i++) s += c[h[i] % c.length];
   return s;
 }
 const dateKey = (t) => new Date(t + TZ_OFFSET_H * 3600e3).toISOString().slice(0, 10);
@@ -33,7 +36,7 @@ if (!fs.existsSync(USERS_F)) {
   users = [];
   const rows = [['Логин', 'Пароль', 'Роль', 'Имя']];
   const add = (login, role, name) => {
-    const p = genPass();
+    const p = genPass(login);
     const salt = crypto.randomBytes(8).toString('hex');
     users.push({ id: login, login, role, name, salt, hash: hash(p, salt), active: false, last: null });
     rows.push([login, p, role === 'admin' ? 'Администратор' : 'Мерчендайзер', name]);
@@ -46,7 +49,10 @@ if (!fs.existsSync(USERS_F)) {
   }
   saveUsers();
   fs.writeFileSync(path.join(DATA, 'credentials.csv'), '﻿' + rows.map((r) => r.join(';')).join('\r\n'));
-  console.log('Созданы 29 учётных записей. Логины и пароли: data/credentials.csv');
+  console.log('Созданы 29 учётных записей.');
+  console.log('================ ЛОГИНЫ И ПАРОЛИ ================');
+  rows.slice(1).forEach((r) => console.log(r[3] + '  —  логин: ' + r[0] + '   пароль: ' + r[1]));
+  console.log('================================================');
 } else {
   users = JSON.parse(fs.readFileSync(USERS_F, 'utf8'));
 }
