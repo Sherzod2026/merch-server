@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Вход — Контроль мерчендайзеров</title>
+<link rel="stylesheet" href="/style.css">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<meta name="theme-color" content="#1f6feb">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Мерч Контроль">
+</head>
+<body>
+<div class="center">
+  <form class="card login" id="f">
+    <h1>Контроль мерчендайзеров</h1>
+    <div class="muted">Введите логин и пароль</div>
+    <label class="field"><span>Логин</span><input id="login" autocomplete="username" autocapitalize="none" required></label>
+    <label class="field"><span>Пароль</span><input id="pass" type="password" autocomplete="current-password" required></label>
+    <button class="btn block" type="submit">Войти</button>
+    <div class="err" id="err"></div>
+  </form>
+</div>
+<script src="/common.js"></script>
+<script>
+  const go = (u) => location.replace(u.role === 'admin' ? '/admin.html' : '/merch.html');
+  if (Auth.token) api('/api/me').then((d) => go(d.user)).catch(() => {});
+  document.getElementById('f').onsubmit = async (e) => {
+    e.preventDefault();
+    const err = document.getElementById('err');
+    err.textContent = '';
+    try {
+      const d = await api('/api/login', { login: login.value, password: pass.value });
+      Auth.set(d.token);
+      go(d.user);
+    } catch (x) { err.textContent = x.message; }
+  };
+</script>
+</body>
+</html>

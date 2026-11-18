@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Администратор — Контроль мерчендайзеров</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="/style.css">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<meta name="theme-color" content="#1f6feb">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Мерч Контроль">
+</head>
+<body>
+<div class="topbar"><b>Контроль мерчендайзеров · <span id="who"></span></b><button class="btn light" onclick="logout()">Выйти</button></div>
+<div class="admin">
+  <div class="side">
+    <div class="tools">
+      <input type="date" id="date" title="Дата маршрута">
+      <button class="btn light" id="allBtn">Все на карте</button>
+    </div>
+    <div class="summary" id="summary"></div>
+    <div class="track-info" id="trackInfo"></div>
+    <div class="list" id="list"></div>
+  </div>
+  <div id="map"></div>
+</div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/common.js"></script>
+<script>
+const FRESH_MS = 5 * 60000;   // считаем «на связи», если точка не старше 5 минут
+const today = () => new Date(Date.now() + 5 * 3600e3).toISOString().slice(0, 10);
+date.value = today();
+
+const map = L.map('map').setView([41.311, 69.279], 11); // Ташкент
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
+const liveLayer = L.layerGroup().addTo(map);
+const trackLayer = L.layerGroup().addTo(map);
+
+let merchs = [], now = Date.now(), selected = null, firstFit = true;
+
+function status(u) {
+  if (!u.active) return 'gray';
+  return u.last && now - u.last.t < FRESH_MS ? 'green' : 'orange';
+}
+const COLORS = { green: '#2e7d32', orange: '#ef8f00', gray: '#9aa5b1' };
+const ST_TEXT = { green: 'Активен, на связи', orange: 'Активен, нет связи', gray: 'Неактивен' };
+
+function renderList() {
+  const c = { green: 0, orange: 0, gray: 0 };
+  merchs.forEach((u) => c[status(u)]++);
+  summary.innerHTML = `<span style="color:${COLORS.green}">● ${c.green} на связи</span> &nbsp; <span style="color:${COLORS.orange}">● ${c.orange} без связи</span> &nbsp; <span style="color:${COLORS.gray}">● ${c.gray} неактивны</span>`;
+  list.innerHTML = merchs.map((u) => {
+    const s = status(u);
+    return `<div class="row ${selected === u.id ? 'sel' : ''}" data-id="${u.id}">
+      <span class="st ${s}"></span>
+      <div class="grow"><div class="nm">${esc(u.name)}</div>
+      <div class="sub">${esc(u.login)} · ${ST_TEXT[s]} · ${u.last ? fmtAgo(u.last.t, now) : 'нет данных'}${u.last && u.last.bat != null ? ' · 🔋' + u.last.bat + '%' : ''}</div></div>
+      <button class="edit" data-edit="${u.id}" title="Изменить имя / пароль">✎</button></div>`;
+  }).join('');
+}
+
+function renderLive() {
+  liveLayer.clearLayers();
+  const pts = [];
+  merchs.forEach((u) => {
+    if (!u.last) return;
+    if (selected && selected !== u.id) return;
+    const s = status(u);
+    const m = L.circleMarker([u.last.lat, u.last.lng], { radius: 9, color: '#fff', weight: 2, fillColor: COLORS[s], fillOpacity: 1 })
+      .bindPopup(`<b>${esc(u.name)}</b><br>${ST_TEXT[s]}<br>Последняя точка: ${fmtAgo(u.last.t, now)} (${fmtTime(u.last.t)})<br>Точность: ${u.last.acc} м${u.last.bat != null ? '<br>Батарея: ' + u.last.bat + '%' : ''}`)
+      .bindTooltip(esc(u.name), { permanent: true, direction: 'right', offset: [8, 0], className: 'lbl' });
+    m.on('click', () => select(u.id));
+    liveLayer.addLayer(m);
+    pts.push([u.last.lat, u.last.lng]);
+  });
+  if (firstFit && pts.length && !selected) { map.fitBounds(pts, { padding: [40, 40], maxZoom: 15 }); firstFit = false; }
+}
+
+async function refresh() {
+  try {
+    const d = await api('/api/admin/live');
+    now = d.now; merchs = d.users;
+    renderList(); renderLive();
+    if (selected && date.value === today()) loadTrack(false);
+  } catch {}
+}
+
+async function loadTrack(fit = true) {
+  const u = merchs.find((x) => x.id === selected);
+  if (!u) return;
+  const d = await api(`/api/admin/track?user=${encodeURIComponent(u.id)}&date=${date.value}`);
+  trackLayer.clearLayers();
+  const p = d.points;
+  trackInfo.style.display = 'block';
+  if (!p.length) {
+    trackInfo.innerHTML = `<b>${esc(u.name)}</b> · ${d.date}<br>За этот день точек нет.`;
+    return;
+  }
+  // Разрываем линию, если между точками больше 15 минут (был выключен)
+  const segs = [[]];
+  let km = 0;
+  p.forEach((pt, i) => {
+    if (i) {
+      const gap = pt.t - p[i - 1].t;
+      if (gap > 15 * 60000) segs.push([]);
+      else km += distM(p[i - 1], pt) / 1000;
+    }
+    segs[segs.length - 1].push([pt.lat, pt.lng]);
+  });
+  segs.forEach((s) => L.polyline(s, { color: '#1f6feb', weight: 4, opacity: .8 }).addTo(trackLayer));
+  p.forEach((pt) => L.circleMarker([pt.lat, pt.lng], { radius: 3, color: '#1f6feb', fillOpacity: 1 })
+    .bindTooltip(fmtTime(pt.t) + ' · ±' + pt.acc + ' м').addTo(trackLayer));
+  const first = p[0], last = p[p.length - 1];
+  L.marker([first.lat, first.lng]).bindPopup('Начало: ' + fmtTime(first.t)).bindTooltip('Старт ' + fmtTime(first.t), { permanent: true, className: 'lbl', direction: 'left' }).addTo(trackLayer);
+  L.circleMarker([last.lat, last.lng], { radius: 10, color: '#fff', weight: 2, fillColor: '#c62828', fillOpacity: 1 })
+    .bindPopup('Последняя точка: ' + fmtTime(last.t)).addTo(trackLayer);
+  const starts = d.events.filter((e) => e.ev === 'start').length;
+  trackInfo.innerHTML = `<b>${esc(u.name)}</b> · ${d.date}<br>
+    Время: ${fmtTime(first.t)} – ${fmtTime(last.t)}<br>
+    Пройдено: ${km.toFixed(1)} км · Точек: ${p.length}${starts ? ' · Активаций: ' + starts : ''}`;
+  if (fit) map.fitBounds(p.map((x) => [x.lat, x.lng]), { padding: [40, 40], maxZoom: 17 });
+}
+
+function select(id) {
+  selected = id;
+  renderList(); renderLive();
+  loadTrack(true);
+}
+function showAll() {
+  selected = null;
+  trackLayer.clearLayers();
+  trackInfo.style.display = 'none';
+  firstFit = true;
+  renderList(); renderLive();
+}
+
+list.onclick = async (e) => {
+  const ed = e.target.closest('[data-edit]');
+  if (ed) {
+    const u = merchs.find((x) => x.id === ed.dataset.edit);
+    const name = prompt('Имя мерчендайзера (' + u.login + '):', u.name);
+    if (name === null) return;
+    const password = prompt('Новый пароль (оставьте пустым, чтобы не менять):', '');
+    if (password === null) return;
+    try { await api('/api/admin/user', { id: u.id, name, password }); refresh(); if (password) alert('Пароль изменён'); }
+    catch (x) { alert(x.message); }
+    return;
+  }
+  const row = e.target.closest('.row');
+  if (row) select(row.dataset.id);
+};
+allBtn.onclick = showAll;
+date.onchange = () => selected && loadTrack(true);
+
+if (!Auth.token) location.replace('/');
+api('/api/me').then((d) => {
+  if (d.user.role !== 'admin') return location.replace('/merch.html');
+  who.textContent = d.user.name;
+  refresh();
+  setInterval(refresh, 15000);
+});
+</script>
+</body>
+</html>

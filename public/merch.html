@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Мерчендайзер</title>
+<link rel="stylesheet" href="/style.css">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<meta name="theme-color" content="#1f6feb">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Мерч Контроль">
+</head>
+<body>
+<div class="topbar"><b id="who">…</b><button class="btn light" onclick="stopAndLogout()">Выйти</button></div>
+<div class="merch">
+  <div class="status"><span class="dot" id="dot"></span><span id="stText">Неактивен</span></div>
+  <button class="big" id="btn">АКТИВИРОВАТЬ</button>
+  <div class="card info">
+    <div>Последняя отправка: <b id="lastSent">—</b></div>
+    <div>Точность GPS: <b id="acc">—</b></div>
+    <div>Не отправлено (нет сети): <b id="queued">0</b></div>
+  </div>
+  <div class="warn" id="warn">Во время работы держите эту страницу открытой и экран включённым. Если закрыть страницу или заблокировать телефон, местоположение может перестать отправляться.</div>
+  <div class="err" id="err"></div>
+</div>
+<script src="/common.js"></script>
+<script>
+const SEND_EVERY_MS = 30000;   // не чаще одного раза в 30 сек
+const MIN_MOVE_M = 25;         // или если сдвинулся больше чем на 25 м
+const HEARTBEAT_MS = 60000;    // даже если стоит на месте — раз в минуту
+let active = false, watchId = null, hb = null, lastSent = 0, lastPt = null, wake = null, battery = null;
+let queue = [];
+try { queue = JSON.parse(localStorage.getItem('mt_queue') || '[]'); } catch {}
+const saveQ = () => { try { localStorage.setItem('mt_queue', JSON.stringify(queue.slice(-2000))); } catch {} ui(); };
+
+function ui() {
+  btn.textContent = active ? 'ОСТАНОВИТЬ' : 'АКТИВИРОВАТЬ';
+  btn.classList.toggle('on', active);
+  dot.classList.toggle('on', active);
+  stText.textContent = active ? 'Активен — местоположение отправляется' : 'Неактивен';
+  queued.textContent = queue.length;
+}
+
+function onPos(p, force) {
+  const pt = { lat: p.coords.latitude, lng: p.coords.longitude, acc: Math.round(p.coords.accuracy), t: Date.now() };
+  if (battery) pt.bat = battery.level * 100;
+  acc.textContent = pt.acc + ' м';
+  err.textContent = '';
+  const moved = lastPt ? distM(lastPt, pt) : Infinity;
+  if (!force && Date.now() - lastSent < SEND_EVERY_MS && moved < MIN_MOVE_M) return;
+  if (lastPt && pt.acc > 300 && moved < pt.acc) return; // слишком неточная точка
+  lastSent = Date.now(); lastPt = pt;
+  queue.push(pt); saveQ(); flush();
+}
+function onErr(e) {
+  err.textContent = e.code === 1
+    ? 'Доступ к геолокации запрещён. Разрешите доступ к местоположению в настройках браузера.'
+    : 'Не удаётся определить местоположение: ' + e.message;
+}
+
+let flushing = false;
+async function flush() {
+  if (flushing || !queue.length) return;
+  flushing = true;
+  try {
+    const batch = queue.slice(0, 300);
+    await api('/api/location', { points: batch });
+    queue.splice(0, batch.length); saveQ();
+    lastSentEl.textContent = fmtTime(Date.now());
+  } catch {}
+  flushing = false;
+}
+const lastSentEl = document.getElementById('lastSent');
+
+async function keepAwake() {
+  try { if ('wakeLock' in navigator && document.visibilityState === 'visible') wake = await navigator.wakeLock.request('screen'); } catch {}
+}
+document.addEventListener('visibilitychange', () => { if (active && document.visibilityState === 'visible') { keepAwake(); flush(); } });
+
+function startTracking() {
+  if (!navigator.geolocation) { err.textContent = 'Этот браузер не поддерживает геолокацию'; return; }
+  watchId = navigator.geolocation.watchPosition(onPos, onErr, { enableHighAccuracy: true, maximumAge: 10000, timeout: 30000 });
+  hb = setInterval(() => navigator.geolocation.getCurrentPosition((p) => onPos(p, Date.now() - lastSent >= HEARTBEAT_MS), () => {}, { enableHighAccuracy: true, maximumAge: 20000, timeout: 30000 }), HEARTBEAT_MS);
+  navigator.geolocation.getCurrentPosition((p) => onPos(p, true), onErr, { enableHighAccuracy: true, timeout: 30000 });
+  keepAwake();
+}
+function stopTracking() {
+  if (watchId != null) navigator.geolocation.clearWatch(watchId);
+  clearInterval(hb); watchId = null; hb = null;
+  try { wake && wake.release(); } catch {}
+}
+
+btn.onclick = async () => {
+  btn.disabled = true;
+  try {
+    const d = await api('/api/active', { active: !active });
+    active = d.active;
+    active ? startTracking() : (stopTracking(), flush());
+    ui();
+  } catch (x) { err.textContent = x.message; }
+  btn.disabled = false;
+};
+
+async function stopAndLogout() {
+  if (active) { try { await api('/api/active', { active: false }); } catch {} stopTracking(); }
+  await flush();
+  logout();
+}
+
+setInterval(flush, 20000);
+window.addEventListener('online', flush);
+if (navigator.getBattery) navigator.getBattery().then((b) => battery = b).catch(() => {});
+
+if (!Auth.token) location.replace('/');
+api('/api/me').then((d) => {
+  if (d.user.role === 'admin') return location.replace('/admin.html');
+  who.textContent = d.user.name;
+  active = d.user.active;
+  if (active) startTracking();
+  ui(); flush();
+});
+</script>
+</body>
+</html>
