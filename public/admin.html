@@ -98,18 +98,22 @@ async function loadTrack(fit = true) {
     trackInfo.innerHTML = `<b>${esc(u.name)}</b> · ${d.date}<br>За этот день точек нет.`;
     return;
   }
-  // Разрываем линию, если между точками больше 15 минут (был выключен)
-  const segs = [[]];
-  let km = 0;
-  p.forEach((pt, i) => {
-    if (i) {
-      const gap = pt.t - p[i - 1].t;
-      if (gap > 15 * 60000) segs.push([]);
-      else km += distM(p[i - 1], pt) / 1000;
+  // Соединяем все точки линией. Сплошная — где запись шла подряд,
+  // пунктир — где был перерыв больше 15 минут (связь прерывалась).
+  let km = 0, kmGap = 0;
+  for (let i = 1; i < p.length; i++) {
+    const a = p[i - 1], b = p[i];
+    const gap = b.t - a.t;
+    const seg = [[a.lat, a.lng], [b.lat, b.lng]];
+    const d2 = distM(a, b) / 1000;
+    if (gap > 15 * 60000) {
+      kmGap += d2;
+      L.polyline(seg, { color: '#9aa5b1', weight: 3, opacity: .75, dashArray: '6,8' }).addTo(trackLayer);
+    } else {
+      km += d2;
+      L.polyline(seg, { color: '#1f6feb', weight: 4, opacity: .85 }).addTo(trackLayer);
     }
-    segs[segs.length - 1].push([pt.lat, pt.lng]);
-  });
-  segs.forEach((s) => L.polyline(s, { color: '#1f6feb', weight: 4, opacity: .8 }).addTo(trackLayer));
+  }
   p.forEach((pt) => L.circleMarker([pt.lat, pt.lng], { radius: 3, color: '#1f6feb', fillOpacity: 1 })
     .bindTooltip(fmtTime(pt.t) + ' · ±' + pt.acc + ' м').addTo(trackLayer));
   const first = p[0], last = p[p.length - 1];
@@ -119,7 +123,7 @@ async function loadTrack(fit = true) {
   const starts = d.events.filter((e) => e.ev === 'start').length;
   trackInfo.innerHTML = `<b>${esc(u.name)}</b> · ${d.date}<br>
     Время: ${fmtTime(first.t)} – ${fmtTime(last.t)}<br>
-    Пройдено: ${km.toFixed(1)} км · Точек: ${p.length}${starts ? ' · Активаций: ' + starts : ''}`;
+    Пройдено: ${km.toFixed(1)} км${kmGap > 0.1 ? ' (+' + kmGap.toFixed(1) + ' км с перерывами)' : ''} · Точек: ${p.length}${starts ? ' · Активаций: ' + starts : ''}`;
   if (fit) map.fitBounds(p.map((x) => [x.lat, x.lng]), { padding: [40, 40], maxZoom: 17 });
 }
 
